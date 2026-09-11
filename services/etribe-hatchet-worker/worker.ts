@@ -1,4 +1,4 @@
-import HatchetClient from "@hatchet-dev/typescript-sdk";
+import { HatchetClient } from "@hatchet-dev/typescript-sdk";
 import { createServer } from "node:http";
 
 const hatchet = HatchetClient.init();
