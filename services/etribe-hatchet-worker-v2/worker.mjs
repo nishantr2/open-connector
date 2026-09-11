@@ -1,8 +1,8 @@
-import HatchetClient from "@hatchet-dev/typescript-sdk";
+import { Hatchet } from "@hatchet-dev/typescript-sdk";
 import { createHmac } from "node:crypto";
 import { createServer } from "node:http";
 
-const h = HatchetClient.init();
+const h = Hatchet.init();
 const U = process.env.SUPABASE_URL;
 const S = process.env.HATCHET_DISPATCH_BRIDGE_SECRET || "";
 const WORKER = "ETRIBE_CLOUD_02";
