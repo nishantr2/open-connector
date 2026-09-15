@@ -155,7 +155,8 @@ async function validateProfile(profile, cwd) {
   throw new Error(`VALIDATION_PROFILE_NOT_ALLOWED:${profile}`);
 }
 async function executeCodexJob(state, jobId) {
-  const input = state?.input_packet || {};
+  const packetInput = state?.input_packet || {};
+  const input = packetInput?.payload && typeof packetInput.payload === "object" && !Array.isArray(packetInput.payload) ? packetInput.payload : packetInput;
   if (String(input.billing_mode || "") !== "openai_api") throw new Error("BILLING_MODE_MUST_BE_OPENAI_API");
   if (input.chatgpt_fallback_forbidden !== true) throw new Error("CHATGPT_FALLBACK_MUST_BE_FORBIDDEN");
   if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY_MISSING");
@@ -168,7 +169,7 @@ async function executeCodexJob(state, jobId) {
   const baseBranch = String(input.base_branch || "main");
   if (!/^[A-Za-z0-9._/-]{1,120}$/.test(baseBranch)) throw new Error("INVALID_BASE_BRANCH");
   const branch = safeBranch(jobId);
-  const objective = String(state?.objective || input.objective || "").trim();
+  const objective = String(input.objective || state?.objective || "").trim();
   if (!objective) throw new Error("OBJECTIVE_REQUIRED");
   const root = await mkdtemp(path.join(tmpdir(), "etribe-codex-"));
   const cwd = path.join(root, "repo");
@@ -319,7 +320,7 @@ async function bridge(action, body = {}) {
   const response = await fetch(`${U}/functions/v1/hatchet-dispatch-bridge`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-bridge-secret": S },
-    body: JSON.stringify({ action, ...body }),
+    body: JSON.stringify({ ...body, action }),
   });
   const text = await response.text();
   let data = {};
@@ -348,7 +349,7 @@ async function handleMcp(message) {
   try {
     let output;
     if (name === "capabilities_list") output = await bridge("capabilities");
-    else if (name === "work_submit") output = await bridge("submit", args);
+    else if (name === "work_submit") output = await bridge("submit", { ...args, job_action: args.action });
     else if (name === "work_status") output = await bridge("job_status", args);
     else return { jsonrpc: "2.0", id, error: { code: -32602, message: "Unknown tool" } };
     return { jsonrpc: "2.0", id, result: toolResult(output, false) };
