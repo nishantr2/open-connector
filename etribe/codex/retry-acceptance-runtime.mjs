@@ -3,12 +3,17 @@ import fs from "node:fs";
 const workerPath = "/app/worker.mjs";
 let source = fs.readFileSync(workerPath, "utf8");
 
+const retryConditionBefore = 'if (retryCount === 0) throw new Error("intentional_acceptance_failure_v2");';
+const retryConditionAfter = 'if (retryCount <= 1) throw new Error("intentional_acceptance_failure_v2");';
+if (source.includes(retryConditionBefore)) source = source.replace(retryConditionBefore, retryConditionAfter);
+else if (!source.includes(retryConditionAfter)) throw new Error("retry_condition_patch_target_not_found");
+
 const retryFunction = `
 async function runRetryAcceptanceOnStartup() {
   if (process.env.RUN_RETRY_ACCEPTANCE_ON_STARTUP !== "true") return;
   await sleep(5000);
   try {
-    const run = await retryAcceptance.runNoWait({ probe: "bounded-retry-acceptance-v1" });
+    const run = await retryAcceptance.runNoWait({ probe: "bounded-retry-acceptance-v2" });
     const runId = await run.getWorkflowRunId();
     console.log(\`RETRY_ACCEPTANCE_DISPATCHED run_id=\${runId}\`);
   } catch (error) {
