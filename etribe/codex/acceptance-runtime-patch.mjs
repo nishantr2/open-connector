@@ -21,6 +21,7 @@ async function runCodexAcceptanceOnStartup() {
   try {
     const prepared = await bridge("codex_acceptance_prepare");
     const jobId = String(prepared?.job_id || "");
+    const idempotencyKey = String(prepared?.idempotency_key || "codex-acceptance-test-v1");
     if (!jobId) throw new Error("ACCEPTANCE_PREPARE_MISSING_JOB");
     if (prepared?.reused === true && prepared?.orchestrator_run_id) {
       console.log(\`CODEX_ACCEPTANCE_ALREADY_BOUND job_id=\${jobId} run_id=\${prepared.orchestrator_run_id}\`);
@@ -30,11 +31,11 @@ async function runCodexAcceptanceOnStartup() {
       console.log(\`CODEX_ACCEPTANCE_REUSED_TERMINAL job_id=\${jobId} status=\${prepared?.status || "unknown"}\`);
       return;
     }
-    const run = await codexJob.runNoWait({ job_id: jobId, idempotency_key: "codex-acceptance-test-v1" });
+    const run = await codexJob.runNoWait({ job_id: jobId, idempotency_key: idempotencyKey });
     const hatchetRunId = await run.getWorkflowRunId();
     const bound = await bridge("codex_acceptance_bind", { job_id: jobId, hatchet_run_id: hatchetRunId });
     if (bound?.bound !== true) throw new Error("ACCEPTANCE_BIND_FAILED");
-    console.log(\`CODEX_ACCEPTANCE_DISPATCHED job_id=\${jobId} run_id=\${hatchetRunId}\`);
+    console.log(\`CODEX_ACCEPTANCE_DISPATCHED job_id=\${jobId} run_id=\${hatchetRunId} key=\${idempotencyKey}\`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(\`CODEX_ACCEPTANCE_BOOTSTRAP_ERROR error=\${message.slice(0, 500)}\`);
