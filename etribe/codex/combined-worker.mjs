@@ -1,6 +1,6 @@
 import { Hatchet } from "@hatchet-dev/typescript-sdk";
 import { Codex } from "@openai/codex-sdk";
-import { createHmac } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { execFile as execFileCb } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -22,6 +22,8 @@ const CODEX_REASONING_EFFORT = process.env.CODEX_REASONING_EFFORT || "medium";
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
 const ALLOW_GITHUB_WRITE = process.env.ALLOW_GITHUB_WRITE === "true";
 const CODEX_ALLOWED_REPOSITORIES = new Set(String(process.env.CODEX_ALLOWED_REPOSITORIES || "nishantr2/open-connector").split(",").map((x) => x.trim()).filter(Boolean));
+const OPS_MCP_BEARER_TOKEN = process.env.OPS_MCP_BEARER_TOKEN || "";
+const OPS_MCP_MAX_BODY_BYTES = Math.max(1024, Math.min(262144, Number(process.env.OPS_MCP_MAX_BODY_BYTES || 262144)));
 const WORKER = "ETRIBE_CLOUD_02";
 if (!U) throw new Error("SUPABASE_URL missing");
 
@@ -289,13 +291,95 @@ const codexJob = h.task({
 });
 
 const port = Math.max(1, Number(process.env.PORT || 3000));
-createServer((req, res) => {
-  if (req.method === "GET" && req.url === "/health") {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", worker: WORKER, openai_configured: Boolean(OPENAI_API_KEY), openai_model: OPENAI_MODEL, codex_registered: true, codex_model: CODEX_MODEL, codex_github_write_configured: Boolean(GITHUB_TOKEN && ALLOW_GITHUB_WRITE), codex_chatgpt_credit_path: false })); return;
+const JSON_HEADERS = { "content-type": "application/json", "cache-control": "no-store" };
+function json(res, status, body) { res.writeHead(status, JSON_HEADERS); res.end(JSON.stringify(body)); }
+function safeTokenMatch(candidate) {
+  if (!OPS_MCP_BEARER_TOKEN || !candidate) return false;
+  const expected = createHmac("sha256", "etribe-ops-mcp-v1").update(OPS_MCP_BEARER_TOKEN).digest();
+  const actual = createHmac("sha256", "etribe-ops-mcp-v1").update(candidate).digest();
+  return timingSafeEqual(expected, actual);
+}
+function requestBearer(req) {
+  const auth = String(req.headers.authorization || "");
+  return auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+}
+async function readJsonBody(req) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > OPS_MCP_MAX_BODY_BYTES) throw new Error("PAYLOAD_TOO_LARGE");
+    chunks.push(chunk);
   }
-  res.writeHead(404, { "content-type": "application/json" }); res.end(JSON.stringify({ error: "not_found" }));
-}).listen(port, () => console.log(`HEALTH_V3_LISTENER port=${port}`));
+  try { return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"); }
+  catch { throw new Error("INVALID_JSON"); }
+}
+async function bridge(action, body = {}) {
+  if (!S) throw new Error("HATCHET_DISPATCH_BRIDGE_SECRET_MISSING");
+  const response = await fetch(`${U}/functions/v1/hatchet-dispatch-bridge`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-bridge-secret": S },
+    body: JSON.stringify({ action, ...body }),
+  });
+  const text = await response.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+  if (!response.ok || data?.error || data?.status === "error") throw new Error(`BRIDGE_${action}:${String(data?.error || data?.raw || response.status).slice(0, 500)}`);
+  return data;
+}
+const MCP_TOOLS = [
+  { name: "capabilities_list", title: "List eTribe capabilities", description: "Read enabled, disabled, blocked, and acceptance state for registered eTribe workers and Hatchet routes.", inputSchema: { type: "object", properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } },
+  { name: "work_submit", title: "Submit bounded eTribe work", description: "Submit a bounded job through the existing Supabase resolver and Hatchet control plane. Disabled or unaccepted capabilities fail closed.", inputSchema: { type: "object", properties: { target: { type: "string" }, action: { type: "string" }, payload: { type: "object" }, idempotency_key: { type: "string" }, project_key: { type: "string" }, company_id: { type: "string" }, property_id: { type: ["string", "null"] } }, required: ["target", "action", "payload", "idempotency_key"], additionalProperties: false }, annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } },
+  { name: "work_status", title: "Get eTribe work status", description: "Read status, result, evidence, and next action for one submitted job.", inputSchema: { type: "object", properties: { job_id: { type: "string" } }, required: ["job_id"], additionalProperties: false }, annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } },
+];
+function toolResult(output, isError = false) {
+  return { content: [{ type: "text", text: JSON.stringify(output) }], structuredContent: output, isError };
+}
+async function handleMcp(message) {
+  const id = message?.id ?? null;
+  if (message?.jsonrpc !== "2.0" || typeof message?.method !== "string") return { jsonrpc: "2.0", id, error: { code: -32600, message: "Invalid Request" } };
+  if (message.method === "notifications/initialized") return null;
+  if (message.method === "ping") return { jsonrpc: "2.0", id, result: {} };
+  if (message.method === "initialize") return { jsonrpc: "2.0", id, result: { protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "etribe-ops-gateway", version: "1.0.0" }, instructions: "Use capabilities_list before work_submit. Disabled or unaccepted capabilities fail closed. Responses contain STATUS, RESULT, EVIDENCE, and NEXT." } };
+  if (message.method === "tools/list") return { jsonrpc: "2.0", id, result: { tools: MCP_TOOLS } };
+  if (message.method !== "tools/call") return { jsonrpc: "2.0", id, error: { code: -32601, message: "Method not found" } };
+  const name = String(message?.params?.name || "");
+  const args = message?.params?.arguments && typeof message.params.arguments === "object" ? message.params.arguments : {};
+  try {
+    let output;
+    if (name === "capabilities_list") output = await bridge("capabilities");
+    else if (name === "work_submit") output = await bridge("submit", args);
+    else if (name === "work_status") output = await bridge("job_status", args);
+    else return { jsonrpc: "2.0", id, error: { code: -32602, message: "Unknown tool" } };
+    return { jsonrpc: "2.0", id, result: toolResult(output, false) };
+  } catch (error) {
+    const output = { STATUS: "ERROR", RESULT: null, EVIDENCE: { error: error instanceof Error ? error.message : String(error) }, NEXT: "Inspect capability state and correct the failed gate before retrying." };
+    return { jsonrpc: "2.0", id, result: toolResult(output, true) };
+  }
+}
+function healthBody() {
+  return { status: "ok", worker: WORKER, gateway: "etribe-ops-mcp-v1", openai_configured: Boolean(OPENAI_API_KEY), openai_model: OPENAI_MODEL, codex_registered: true, codex_model: CODEX_MODEL, codex_github_write_configured: Boolean(GITHUB_TOKEN && ALLOW_GITHUB_WRITE), codex_chatgpt_credit_path: false };
+}
+function readyBody() {
+  const gates = { supabase_url: Boolean(U), bridge_secret: Boolean(S), mcp_auth: Boolean(OPS_MCP_BEARER_TOKEN), openai_api: Boolean(OPENAI_API_KEY), github_write: Boolean(GITHUB_TOKEN && ALLOW_GITHUB_WRITE), dedicated_repo_allowed: CODEX_ALLOWED_REPOSITORIES.has("nishantr2/etribe-ops") };
+  return { status: Object.values(gates).every(Boolean) ? "ready" : "not_ready", gates };
+}
+createServer(async (req, res) => {
+  const pathname = new URL(req.url || "/", "http://localhost").pathname;
+  if (req.method === "GET" && (pathname === "/health" || pathname === "/healthz")) return json(res, 200, healthBody());
+  if (req.method === "GET" && pathname === "/readyz") { const body = readyBody(); return json(res, body.status === "ready" ? 200 : 503, body); }
+  if (pathname !== "/mcp") return json(res, 404, { error: "not_found" });
+  if (req.method !== "POST") return json(res, 405, { error: "method_not_allowed" });
+  if (!safeTokenMatch(requestBearer(req))) return json(res, 401, { error: "unauthorized" });
+  try {
+    const reply = await handleMcp(await readJsonBody(req));
+    if (reply === null) { res.writeHead(204, { "cache-control": "no-store" }); return res.end(); }
+    return json(res, 200, reply);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return json(res, message === "PAYLOAD_TOO_LARGE" ? 413 : 400, { jsonrpc: "2.0", id: null, error: { code: -32700, message } });
+  }
+}).listen(port, () => console.log(`HEALTH_V4_MCP_LISTENER port=${port}`));
 async function selfTest() {
   if (process.env.RUN_STARTUP_SELF_TEST !== "true") return; await sleep(5000);
   try { const run = await acceptance.runNoWait({ probe: "railway-normal-service-v3" }); console.log(`ACCEPTANCE_V3_PASS run_id=${await run.getWorkflowRunId()} result=${JSON.stringify(await run.result())}`); } catch (error) { console.error("ACCEPTANCE_V3_FAIL", error); }
