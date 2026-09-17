@@ -27,7 +27,7 @@ source = source.replace(
 
 const packetStringify = "safeStringify(inputPacket)";
 if (source.includes(packetStringify)) {
-  source = source.replace(packetStringify, "safeStringify(inputPacket, 60000)");
+  source = source.replace(packetStringify, "safeStringify(inputPacket, 120000)");
 }
 
 await writeFile(workerPath, source, "utf8");
