@@ -7,6 +7,8 @@ services:
       - "3000:3000"
     volumes:
       - connector-data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       OOMOL_CONNECT_DATA_DIR: /app/data
       OOMOL_CONNECT_ORIGIN:
@@ -20,6 +22,8 @@ services:
       OOMOL_CONNECT_BLOCKED_ACTIONS:
       OOMOL_CONNECT_ALLOWED_PROXIES:
       OOMOL_CONNECT_BLOCKED_PROXIES:
+      FIRECRAWL_API_URL: ${FIRECRAWL_API_URL:-http://host.docker.internal:3002}
+      FIRECRAWL_ALLOW_CLOUD: ${FIRECRAWL_ALLOW_CLOUD:-false}
 
 volumes:
   connector-data:
