@@ -5,7 +5,7 @@ import { firecrawlActions } from "./actions.ts";
 const service = "firecrawl";
 
 /**
- * Firecrawl provider backed by the Firecrawl REST API.
+ * Firecrawl provider. eTribe defaults execution to its self-hosted Firecrawl endpoint; cloud use is an explicit paid fallback.
  */
 export const provider: ProviderDefinition = {
   service,
@@ -15,10 +15,10 @@ export const provider: ProviderDefinition = {
   auth: [
     {
       type: "api_key",
-      label: "API Key",
-      placeholder: "fc-...",
+      label: "API Key (cloud fallback only)",
+      placeholder: "fc-... (not sent to self-hosted Firecrawl)",
       description:
-        "Firecrawl API key used with the Authorization Bearer header. Create it in Firecrawl API Keys: https://firecrawl.dev/app/api-keys.",
+        "Retained for explicit Firecrawl Cloud use only. Self-hosted requests do not send this key. Cloud execution also requires FIRECRAWL_ALLOW_CLOUD=true.",
     },
   ],
   homepageUrl: "https://www.firecrawl.dev",

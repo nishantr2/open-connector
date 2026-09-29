@@ -6,7 +6,8 @@ import { compactObject, optionalNumber, optionalRecord, optionalString, pickOpti
 import { defineApiKeyProviderExecutors, providerUserAgent, ProviderRequestError } from "../provider-runtime.ts";
 
 const service = "firecrawl";
-const firecrawlApiBaseUrl = "https://api.firecrawl.dev";
+const firecrawlDefaultSelfHostedBaseUrl = "http://127.0.0.1:3002";
+const firecrawlCloudBaseUrl = "https://api.firecrawl.dev";
 const firecrawlScrapeOptionAliasKeys = [
   "scrapeOptions_actions",
   "scrapeOptions_formats",
@@ -75,10 +76,28 @@ export const firecrawlActionHandlers: Record<FirecrawlActionName, FirecrawlActio
   token_usage_get_historical: firecrawlGetAction(() => "/v2/team/token-usage/historical", buildHistoricalUsageQuery),
 };
 
-export const executors: ProviderExecutors = defineApiKeyProviderExecutors(service, firecrawlActionHandlers);
+export const executors: ProviderExecutors = defineApiKeyProviderExecutors(service, firecrawlActionHandlers, {
+  allowPrivateNetwork: () => !isFirecrawlCloudBaseUrl(readFirecrawlApiBaseUrl()),
+});
 
 export const credentialValidators: CredentialValidators = {
   async apiKey(input, { fetcher, signal }) {
+    const apiBaseUrl = readFirecrawlApiBaseUrl();
+    if (!isFirecrawlCloudBaseUrl(apiBaseUrl)) {
+      return {
+        profile: {
+          accountId: "self_hosted",
+          displayName: "Self-hosted Firecrawl",
+        },
+        grantedScopes: [],
+        metadata: {
+          apiBaseUrl,
+          mode: "self_hosted",
+          cloudCreditsUsed: false,
+        },
+      };
+    }
+
     const payload = optionalRecord(
       await firecrawlRequest({
         apiKey: input.apiKey,
@@ -92,11 +111,12 @@ export const credentialValidators: CredentialValidators = {
     return {
       profile: {
         accountId: "api_key",
-        displayName: "Firecrawl API Key",
+        displayName: "Firecrawl Cloud API Key",
       },
       grantedScopes: [],
       metadata: compactObject({
-        apiBaseUrl: firecrawlApiBaseUrl,
+        apiBaseUrl,
+        mode: "cloud_explicit",
         validationEndpoint: "/v2/team/credit-usage",
         teamCreditUsage: optionalRecord(payload?.data),
         success: typeof payload?.success === "boolean" ? payload.success : undefined,
@@ -211,7 +231,8 @@ async function firecrawlRequest(
     signal?: AbortSignal;
   },
 ): Promise<unknown> {
-  const url = new URL(input.path, firecrawlApiBaseUrl);
+  const apiBaseUrl = readFirecrawlApiBaseUrl();
+  const url = new URL(input.path, `${apiBaseUrl}/`);
   for (const [key, value] of Object.entries(input.query ?? {})) {
     if (value == null) {
       continue;
@@ -229,7 +250,7 @@ async function firecrawlRequest(
   try {
     response = await input.fetcher(url, {
       method: input.method ?? "GET",
-      headers: buildFirecrawlHeaders(input.apiKey, input.body !== undefined),
+      headers: buildFirecrawlHeaders(isFirecrawlCloudBaseUrl(apiBaseUrl) ? input.apiKey : undefined, input.body !== undefined),
       body: input.body === undefined ? undefined : JSON.stringify(input.body),
       signal: input.signal,
     });
@@ -251,11 +272,13 @@ async function firecrawlRequest(
   return payload;
 }
 
-function buildFirecrawlHeaders(apiKey: string, hasBody: boolean): Headers {
+function buildFirecrawlHeaders(apiKey: string | undefined, hasBody: boolean): Headers {
   const headers = new Headers({
-    authorization: `Bearer ${apiKey}`,
     "user-agent": providerUserAgent,
   });
+  if (apiKey) {
+    headers.set("authorization", `Bearer ${apiKey}`);
+  }
   if (hasBody) {
     headers.set("content-type", "application/json");
   }
@@ -319,6 +342,40 @@ function mergeRecords(...records: Array<Record<string, unknown> | undefined>): R
     ...records.filter((record): record is Record<string, unknown> => record !== undefined),
   );
   return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
+
+function readFirecrawlApiBaseUrl(): string {
+  const configured = process.env.FIRECRAWL_API_URL?.trim() || firecrawlDefaultSelfHostedBaseUrl;
+  let url: URL;
+  try {
+    url = new URL(configured);
+  } catch {
+    throw new ProviderRequestError(500, "FIRECRAWL_API_URL must be a valid URL");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new ProviderRequestError(500, "FIRECRAWL_API_URL must use http or https");
+  }
+  const normalized = url.toString().replace(/\/+$/u, "");
+  if (isFirecrawlCloudBaseUrl(normalized) && !readFirecrawlAllowCloud()) {
+    throw new ProviderRequestError(
+      503,
+      "Firecrawl Cloud is disabled by default. Set FIRECRAWL_ALLOW_CLOUD=true only for an explicitly approved paid-cloud route.",
+    );
+  }
+  return normalized;
+}
+
+function isFirecrawlCloudBaseUrl(baseUrl: string): boolean {
+  try {
+    return new URL(baseUrl).hostname.toLowerCase() === new URL(firecrawlCloudBaseUrl).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
+function readFirecrawlAllowCloud(): boolean {
+  return ["1", "true", "yes", "on"].includes((process.env.FIRECRAWL_ALLOW_CLOUD ?? "").trim().toLowerCase());
 }
 
 function optionalArray(value: unknown): unknown[] | undefined {
