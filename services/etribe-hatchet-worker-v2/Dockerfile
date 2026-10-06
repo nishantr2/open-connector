@@ -1,7 +1,7 @@
-FROM oven/bun:1.2.22
+FROM node:22-alpine
 WORKDIR /app
 COPY package.json ./
-RUN bun install --production
-COPY index.ts ./index.ts
+RUN npm install --omit=dev --no-audit --no-fund
+COPY worker.mjs ./worker.mjs
 EXPOSE 3000
-CMD ["bun", "run", "index.ts"]
+CMD ["node", "worker.mjs"]
